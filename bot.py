@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import os
+import re
 
 from google import genai
 from google.genai import errors as genai_errors, types
@@ -49,31 +50,67 @@ def _thread_id(message: Message) -> int | None:
 
 # ── Markdown helpers ──────────────────────────────────────────────────
 
-_MARKDOWNV2_SPECIAL = r"_*[]()~`>#+-=|{}.!"
+_MD2_SPECIAL_RE = re.compile(r'([_*\[\]()~`>#\+\-=|{}.!\\])')
+_CODE_BLOCK_RE = re.compile(r'(```(?:[^\n]*\n)?[\s\S]*?```)')
+_INLINE_CODE_RE = re.compile(r'(`[^`\n]+`)')
+_FMT_RE = re.compile(
+    r'\*\*(?P<bold>.+?)\*\*'
+    r'|(?<!\*)\*(?!\*)(?P<italic_s>.+?)(?<!\*)\*(?!\*)'
+    r'|(?<!\w)_(?P<italic_u>[^_]+?)_(?!\w)'
+    r'|~~(?P<strike>.+?)~~'
+    r'|\[(?P<lt>[^\]]+)\]\((?P<lu>[^)]+)\)'
+)
 
 
-def _escape_md2(text: str) -> str:
-    """Escape MarkdownV2 special characters outside of code blocks."""
+def _esc(text: str) -> str:
+    """Escape all MarkdownV2 special characters."""
+    return _MD2_SPECIAL_RE.sub(r'\\\1', text)
+
+
+def _convert_formatting(text: str) -> str:
+    """Convert bold/italic/strike/links to MarkdownV2 and escape the rest."""
     result: list[str] = []
-    parts = text.split("```")
-    for i, part in enumerate(parts):
-        if i % 2 == 1:
-            # inside a code block – keep as-is
-            result.append(f"```{part}```")
-        else:
-            # outside code blocks – escape inline code first, then the rest
-            segments = part.split("`")
-            escaped_segments: list[str] = []
-            for j, seg in enumerate(segments):
-                if j % 2 == 1:
-                    escaped_segments.append(f"`{seg}`")
-                else:
-                    escaped_segments.append(
-                        "".join(f"\\{c}" if c in _MARKDOWNV2_SPECIAL else c for c in seg)
-                    )
-            result.append("".join(escaped_segments))
-    return "".join(result)
+    last = 0
+    for m in _FMT_RE.finditer(text):
+        result.append(_esc(text[last:m.start()]))
+        if m.group('bold'):
+            result.append(f"*{_esc(m.group('bold'))}*")
+        elif m.group('italic_s'):
+            result.append(f"_{_esc(m.group('italic_s'))}_")
+        elif m.group('italic_u'):
+            result.append(f"_{_esc(m.group('italic_u'))}_")
+        elif m.group('strike'):
+            result.append(f"~{_esc(m.group('strike'))}~")
+        elif m.group('lt'):
+            result.append(f"[{_esc(m.group('lt'))}]({m.group('lu')})")
+        last = m.end()
+    result.append(_esc(text[last:]))
+    return ''.join(result)
 
+
+def _convert_inline(text: str) -> str:
+    """Process text outside code blocks: preserve inline code, convert formatting."""
+    result: list[str] = []
+    for part in _INLINE_CODE_RE.split(text):
+        if len(part) >= 2 and part.startswith('`') and part.endswith('`'):
+            result.append(part)
+        else:
+            result.append(_convert_formatting(part))
+    return ''.join(result)
+
+
+def _md_to_mdv2(text: str) -> str:
+    """Convert standard Markdown (from Gemini) to Telegram MarkdownV2."""
+    result: list[str] = []
+    for part in _CODE_BLOCK_RE.split(text):
+        if part.startswith('```') and part.endswith('```'):
+            result.append(part)
+        else:
+            result.append(_convert_inline(part))
+    return ''.join(result)
+
+
+# ── Message splitting ────────────────────────────────────────────────
 
 MAX_MSG_LEN = 4000
 
@@ -115,11 +152,70 @@ def _split_message(text: str) -> list[str]:
     return chunks
 
 
+def _fix_chunks(chunks: list[str]) -> list[str]:
+    """Close unclosed Markdown formatting at chunk ends, reopen at next chunk start."""
+    if len(chunks) <= 1:
+        return chunks
+
+    fixed: list[str] = []
+    reopen = ""
+
+    for chunk in chunks:
+        chunk = reopen + chunk
+        reopen = ""
+        close = ""
+
+        # Code blocks: if odd count of ```, the block is unclosed
+        if chunk.count("```") % 2 == 1:
+            close = "\n```"
+            reopen = "```\n"
+            fixed.append(chunk + close)
+            continue
+
+        # Strip complete code blocks for inline analysis
+        stripped = re.sub(r'```[\s\S]*?```', '', chunk)
+
+        # Inline code
+        if stripped.count('`') % 2 == 1:
+            close += "`"
+            reopen += "`"
+
+        # Strip inline code for further checks
+        stripped = re.sub(r'`[^`]*`', '', stripped)
+
+        # Bold (**)
+        if stripped.count('**') % 2 == 1:
+            close += "**"
+            reopen += "**"
+
+        # Strikethrough (~~)
+        if stripped.count('~~') % 2 == 1:
+            close += "~~"
+            reopen += "~~"
+
+        # Italic (*) — remove ** pairs first, count remaining *
+        no_bold = stripped.replace('**', '')
+        if no_bold.count('*') % 2 == 1:
+            close += "*"
+            reopen += "*"
+
+        # Italic (_) — remove __ pairs first, count remaining _
+        no_dunder = stripped.replace('__', '')
+        if no_dunder.count('_') % 2 == 1:
+            close += "_"
+            reopen += "_"
+
+        fixed.append(chunk + close)
+
+    return fixed
+
+
 async def _reply(message: Message, text: str) -> None:
-    """Send text, splitting into multiple messages if it exceeds Telegram's limit."""
-    for chunk in _split_message(text):
+    """Send text as MarkdownV2, splitting long messages and fixing unclosed tags."""
+    chunks = _fix_chunks(_split_message(text))
+    for chunk in chunks:
         try:
-            await message.reply(_escape_md2(chunk), parse_mode=ParseMode.MARKDOWN_V2)
+            await message.reply(_md_to_mdv2(chunk), parse_mode=ParseMode.MARKDOWN_V2)
         except Exception:
             await message.reply(chunk)
 
@@ -221,7 +317,7 @@ async def on_model_selected(callback: CallbackQuery) -> None:
     thread = callback.message.message_thread_id if callback.message.is_topic_message else None
     set_model(chat_id, thread, model)
     await callback.answer(f"Switched to {model}")
-    await callback.message.edit_text(f"Model set to `{_escape_md2(model)}`", parse_mode=ParseMode.MARKDOWN_V2)
+    await callback.message.edit_text(f"Model set to `{model}`", parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def _ask_gemini(
