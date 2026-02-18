@@ -75,12 +75,53 @@ def _escape_md2(text: str) -> str:
     return "".join(result)
 
 
+MAX_MSG_LEN = 4000
+
+
+def _split_message(text: str) -> list[str]:
+    """Split text into <=MAX_MSG_LEN chunks on paragraph / code-block boundaries."""
+    if len(text) <= MAX_MSG_LEN:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+
+    while remaining:
+        if len(remaining) <= MAX_MSG_LEN:
+            chunks.append(remaining)
+            break
+
+        slice_ = remaining[:MAX_MSG_LEN]
+
+        # try splitting at a code block boundary (```)
+        cut = slice_.rfind("\n```")
+        if cut > MAX_MSG_LEN // 4:
+            cut += 1  # include the newline, split before ```
+        else:
+            # try splitting at a paragraph break
+            cut = slice_.rfind("\n\n")
+        if cut <= MAX_MSG_LEN // 4:
+            # try a single newline
+            cut = slice_.rfind("\n")
+        if cut <= MAX_MSG_LEN // 4:
+            # try a space
+            cut = slice_.rfind(" ")
+        if cut <= 0:
+            cut = MAX_MSG_LEN
+
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip("\n")
+
+    return chunks
+
+
 async def _reply(message: Message, text: str) -> None:
-    """Try sending with MarkdownV2; fall back to plain text on failure."""
-    try:
-        await message.reply(_escape_md2(text), parse_mode=ParseMode.MARKDOWN_V2)
-    except Exception:
-        await message.reply(text)
+    """Send text, splitting into multiple messages if it exceeds Telegram's limit."""
+    for chunk in _split_message(text):
+        try:
+            await message.reply(_escape_md2(chunk), parse_mode=ParseMode.MARKDOWN_V2)
+        except Exception:
+            await message.reply(chunk)
 
 
 # ── Access control ────────────────────────────────────────────────────
