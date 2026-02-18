@@ -63,8 +63,18 @@ _FMT_RE = re.compile(
 
 
 def _esc(text: str) -> str:
-    """Escape all MarkdownV2 special characters."""
+    """Escape all MarkdownV2 special characters (for plain text regions)."""
     return _MD2_SPECIAL_RE.sub(r'\\\1', text)
+
+
+def _esc_code(text: str) -> str:
+    """Escape \\ and ` inside code/pre entities (Telegram MarkdownV2 requirement)."""
+    return text.replace('\\', '\\\\').replace('`', '\\`')
+
+
+def _esc_url(url: str) -> str:
+    """Escape \\ and ) inside inline-link URLs (Telegram MarkdownV2 requirement)."""
+    return url.replace('\\', '\\\\').replace(')', '\\)')
 
 
 def _convert_formatting(text: str) -> str:
@@ -82,18 +92,19 @@ def _convert_formatting(text: str) -> str:
         elif m.group('strike'):
             result.append(f"~{_esc(m.group('strike'))}~")
         elif m.group('lt'):
-            result.append(f"[{_esc(m.group('lt'))}]({m.group('lu')})")
+            result.append(f"[{_esc(m.group('lt'))}]({_esc_url(m.group('lu'))})")
         last = m.end()
     result.append(_esc(text[last:]))
     return ''.join(result)
 
 
 def _convert_inline(text: str) -> str:
-    """Process text outside code blocks: preserve inline code, convert formatting."""
+    """Process text outside code blocks: escape inline code content, convert formatting."""
     result: list[str] = []
     for part in _INLINE_CODE_RE.split(text):
         if len(part) >= 2 and part.startswith('`') and part.endswith('`'):
-            result.append(part)
+            inner = part[1:-1]
+            result.append(f"`{_esc_code(inner)}`")
         else:
             result.append(_convert_formatting(part))
     return ''.join(result)
@@ -104,7 +115,8 @@ def _md_to_mdv2(text: str) -> str:
     result: list[str] = []
     for part in _CODE_BLOCK_RE.split(text):
         if part.startswith('```') and part.endswith('```'):
-            result.append(part)
+            inner = part[3:-3]
+            result.append(f"```{_esc_code(inner)}```")
         else:
             result.append(_convert_inline(part))
     return ''.join(result)
@@ -217,7 +229,12 @@ async def _reply(message: Message, text: str) -> None:
         try:
             await message.reply(_md_to_mdv2(chunk), parse_mode=ParseMode.MARKDOWN_V2)
         except Exception:
-            await message.reply(chunk)
+            log.debug("MarkdownV2 conversion failed, trying escaped fallback", exc_info=True)
+            try:
+                await message.reply(_esc(chunk), parse_mode=ParseMode.MARKDOWN_V2)
+            except Exception:
+                log.debug("Escaped MarkdownV2 also failed, sending plain text", exc_info=True)
+                await message.reply(chunk)
 
 
 # ── Access control ────────────────────────────────────────────────────
@@ -304,7 +321,7 @@ async def cmd_model(message: Message) -> None:
         for m in MODEL_OPTIONS
     ]
     await message.reply(
-        f"Current model: `{current}`\nChoose a model:",
+        f"Current model: `{_esc_code(current)}`\nChoose a model:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode=ParseMode.MARKDOWN_V2,
     )
@@ -317,7 +334,7 @@ async def on_model_selected(callback: CallbackQuery) -> None:
     thread = callback.message.message_thread_id if callback.message.is_topic_message else None
     set_model(chat_id, thread, model)
     await callback.answer(f"Switched to {model}")
-    await callback.message.edit_text(f"Model set to `{model}`", parse_mode=ParseMode.MARKDOWN_V2)
+    await callback.message.edit_text(f"Model set to `{_esc_code(model)}`", parse_mode=ParseMode.MARKDOWN_V2)
 
 
 async def _ask_gemini(
