@@ -4,10 +4,13 @@ import os
 
 from google import genai
 from google.genai import errors as genai_errors, types
-from aiogram import Bot, Dispatcher, F
+from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.enums import ChatAction, ParseMode
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.filters import IS_NOT_MEMBER, IS_MEMBER
+from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
+
+from typing import Any, Awaitable, Callable
 
 from db import clear_history, get_history, get_model, init_db, save_message, set_model
 
@@ -15,6 +18,12 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+
+ALLOWED_USER_IDS: set[int] = {
+    int(uid.strip())
+    for uid in os.getenv("ALLOWED_USER_IDS", "").split(",")
+    if uid.strip()
+}
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -70,6 +79,59 @@ async def _reply(message: Message, text: str) -> None:
         await message.reply(_escape_md2(text), parse_mode=ParseMode.MARKDOWN_V2)
     except Exception:
         await message.reply(text)
+
+
+# ── Access control ────────────────────────────────────────────────────
+
+_denied_users: set[int] = set()
+
+
+def _is_allowed(user_id: int | None) -> bool:
+    """Return True if the user is allowed (or if no allowlist is configured)."""
+    if not ALLOWED_USER_IDS:
+        return True
+    return user_id is not None and user_id in ALLOWED_USER_IDS
+
+
+@dp.my_chat_member(IS_NOT_MEMBER >> IS_MEMBER)
+async def on_bot_added(event: ChatMemberUpdated) -> None:
+    """Leave the group if the user who added the bot is not allowed."""
+    if _is_allowed(event.from_user.id):
+        return
+    log.warning(
+        "Unauthorized user %s added bot to chat %s — leaving",
+        event.from_user.id,
+        event.chat.id,
+    )
+    await bot.leave_chat(event.chat.id)
+
+
+class AccessMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[Message, dict[str, Any]], Awaitable[Any]],
+        event: Message,
+        data: dict[str, Any],
+    ) -> Any:
+        if not ALLOWED_USER_IDS:
+            return await handler(event, data)
+        user = getattr(event, "from_user", None)
+        user_id = user.id if user else None
+        if _is_allowed(user_id):
+            return await handler(event, data)
+        # One-time denial message
+        if user_id and user_id not in _denied_users:
+            _denied_users.add(user_id)
+            log.info("Access denied for user %s", user_id)
+            try:
+                await event.reply("Sorry, this is a private bot. Access denied.")
+            except Exception:
+                pass
+        return None
+
+
+dp.message.middleware(AccessMiddleware())
+dp.callback_query.middleware(AccessMiddleware())
 
 
 # ── Handlers ──────────────────────────────────────────────────────────
