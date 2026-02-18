@@ -1,4 +1,5 @@
 import asyncio
+import io
 import logging
 import os
 
@@ -9,6 +10,7 @@ from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import IS_NOT_MEMBER, IS_MEMBER
 from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
+from PIL import Image
 
 from typing import Any, Awaitable, Callable
 
@@ -181,19 +183,17 @@ async def on_model_selected(callback: CallbackQuery) -> None:
     await callback.message.edit_text(f"Model set to `{_escape_md2(model)}`", parse_mode=ParseMode.MARKDOWN_V2)
 
 
-@dp.message(F.text)
-async def handle_message(message: Message) -> None:
-    chat_id = message.chat.id
-    thread = _thread_id(message)
-    user_text = message.text
-
-    # show typing indicator
+async def _ask_gemini(
+    message: Message,
+    chat_id: int,
+    thread: int | None,
+    user_content: str | list,
+    user_text_for_history: str,
+) -> None:
+    """Shared helper: send content to Gemini, handle errors, persist & reply."""
     await bot.send_chat_action(chat_id, ChatAction.TYPING)
 
-    # resolve model for this chat/thread
     model_name = get_model(chat_id, thread) or DEFAULT_MODEL
-
-    # load history and build contents for Gemini
     history = get_history(chat_id, thread)
 
     try:
@@ -204,7 +204,7 @@ async def handle_message(message: Message) -> None:
             ),
             history=history,
         )
-        response = await asyncio.to_thread(chat.send_message, user_text)
+        response = await asyncio.to_thread(chat.send_message, user_content)
         reply_text = response.text
     except genai_errors.ClientError as exc:
         if exc.status_code == 404:
@@ -222,11 +222,47 @@ async def handle_message(message: Message) -> None:
         await _reply(message, "Sorry, something went wrong while generating a response.")
         return
 
-    # persist both messages
-    save_message(chat_id, thread, "user", user_text)
+    save_message(chat_id, thread, "user", user_text_for_history)
     save_message(chat_id, thread, "model", reply_text)
 
     await _reply(message, reply_text)
+
+
+@dp.message(F.photo)
+async def handle_photo(message: Message) -> None:
+    chat_id = message.chat.id
+    thread = _thread_id(message)
+    caption = message.caption or "Describe this image"
+
+    # download highest-resolution photo
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    buf = io.BytesIO()
+    await bot.download_file(file.file_path, buf)
+    buf.seek(0)
+    image = Image.open(buf)
+
+    await _ask_gemini(
+        message,
+        chat_id,
+        thread,
+        user_content=[caption, image],
+        user_text_for_history=f"[Image] {caption}",
+    )
+
+
+@dp.message(F.text)
+async def handle_message(message: Message) -> None:
+    chat_id = message.chat.id
+    thread = _thread_id(message)
+
+    await _ask_gemini(
+        message,
+        chat_id,
+        thread,
+        user_content=message.text,
+        user_text_for_history=message.text,
+    )
 
 
 # ── Entry point ───────────────────────────────────────────────────────
