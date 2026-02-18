@@ -35,6 +35,7 @@ MODEL_OPTIONS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
 SYSTEM_INSTRUCTION = (
     "You are a helpful assistant that remembers context. "
     "Answer concisely and use Markdown formatting when appropriate."
+    "You are working via telegram.  Do not ever use MarkDown's tables."
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
