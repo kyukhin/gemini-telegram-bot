@@ -1,0 +1,15 @@
+[Unit]
+Description=Gemini Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=bot
+WorkingDirectory=/opt/gemini-bot
+EnvironmentFile=/opt/gemini-bot/.env
+ExecStart=/opt/gemini-bot/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+.env
+venv/
+__pycache__/
+conversations.db
+conversations.db-shm
+conversations.db-wal
