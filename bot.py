@@ -3,13 +3,13 @@ import logging
 import os
 
 from google import genai
-from google.genai import types
+from google.genai import errors as genai_errors, types
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ChatAction, ParseMode
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from dotenv import load_dotenv
 
-from db import clear_history, get_history, init_db, save_message
+from db import clear_history, get_history, get_model, init_db, save_message, set_model
 
 load_dotenv()
 
@@ -18,7 +18,8 @@ GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+MODEL_OPTIONS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
 SYSTEM_INSTRUCTION = (
     "You are a helpful assistant that remembers context. "
     "Answer concisely and use Markdown formatting when appropriate."
@@ -79,7 +80,7 @@ async def cmd_start(message: Message) -> None:
     await _reply(
         message,
         "Hello! I'm a Gemini-powered assistant. Send me any message and I'll reply with context awareness.\n\n"
-        "Commands:\n/clear — erase conversation history for this chat/topic.",
+        "Commands:\n/clear — erase conversation history for this chat/topic\n/model — switch the Gemini model",
     )
 
 
@@ -88,6 +89,34 @@ async def cmd_clear(message: Message) -> None:
     thread = _thread_id(message)
     deleted = clear_history(message.chat.id, thread)
     await _reply(message, f"Cleared {deleted} messages from history.")
+
+
+@dp.message(F.text == "/model")
+async def cmd_model(message: Message) -> None:
+    thread = _thread_id(message)
+    current = get_model(message.chat.id, thread) or DEFAULT_MODEL
+    buttons = [
+        [InlineKeyboardButton(
+            text=("• " + m if m == current else m),
+            callback_data=f"model:{m}",
+        )]
+        for m in MODEL_OPTIONS
+    ]
+    await message.reply(
+        f"Current model: `{current}`\nChoose a model:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode=ParseMode.MARKDOWN_V2,
+    )
+
+
+@dp.callback_query(F.data.startswith("model:"))
+async def on_model_selected(callback: CallbackQuery) -> None:
+    model = callback.data.removeprefix("model:")
+    chat_id = callback.message.chat.id
+    thread = callback.message.message_thread_id if callback.message.is_topic_message else None
+    set_model(chat_id, thread, model)
+    await callback.answer(f"Switched to {model}")
+    await callback.message.edit_text(f"Model set to `{_escape_md2(model)}`", parse_mode=ParseMode.MARKDOWN_V2)
 
 
 @dp.message(F.text)
@@ -99,12 +128,15 @@ async def handle_message(message: Message) -> None:
     # show typing indicator
     await bot.send_chat_action(chat_id, ChatAction.TYPING)
 
+    # resolve model for this chat/thread
+    model_name = get_model(chat_id, thread) or DEFAULT_MODEL
+
     # load history and build contents for Gemini
     history = get_history(chat_id, thread)
 
     try:
         chat = client.chats.create(
-            model=MODEL_NAME,
+            model=model_name,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
             ),
@@ -112,6 +144,17 @@ async def handle_message(message: Message) -> None:
         )
         response = await asyncio.to_thread(chat.send_message, user_text)
         reply_text = response.text
+    except genai_errors.ClientError as exc:
+        if exc.status_code == 404:
+            log.warning("Model not found: %s", model_name)
+            await _reply(
+                message,
+                f"Model `{model_name}` was not found. Use /model to pick a valid model.",
+            )
+        else:
+            log.exception("Gemini API client error")
+            await _reply(message, "Sorry, something went wrong while generating a response.")
+        return
     except Exception:
         log.exception("Gemini API error")
         await _reply(message, "Sorry, something went wrong while generating a response.")

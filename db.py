@@ -32,6 +32,16 @@ def init_db() -> None:
             ON conversations (chat_id, thread_id)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER,
+                current_model TEXT NOT NULL,
+                UNIQUE(chat_id, thread_id)
+            )
+            """
+        )
 
 
 def save_message(chat_id: int, thread_id: int | None, role: str, content: str) -> None:
@@ -60,6 +70,23 @@ def get_history(chat_id: int, thread_id: int | None, limit: int = 50) -> list[ty
         types.Content(role=role, parts=[types.Part(text=content)])
         for role, content in rows
     ]
+
+
+def get_model(chat_id: int, thread_id: int | None) -> str | None:
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT current_model FROM settings WHERE chat_id = ? AND thread_id IS ?",
+            (chat_id, thread_id),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def set_model(chat_id: int, thread_id: int | None, model: str) -> None:
+    with _get_conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (chat_id, thread_id, current_model) VALUES (?, ?, ?)",
+            (chat_id, thread_id, model),
+        )
 
 
 def clear_history(chat_id: int, thread_id: int | None) -> int:
