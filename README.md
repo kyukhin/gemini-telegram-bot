@@ -8,6 +8,8 @@ A Telegram bot powered by the Gemini API with persistent per-chat conversation h
 - Per-chat and per-topic (forum mode) conversation history stored in SQLite
 - `/start`, `/clear`, and `/model` commands
 - Dynamic per-chat model switching with inline keyboard
+- Vision support — send a photo and the bot will analyze it
+- Smart message splitting for long responses
 - MarkdownV2 rendering with plain-text fallback
 
 ## Obtaining API keys
@@ -42,6 +44,21 @@ Send `/model` to see an inline keyboard with available models. The currently act
 Available models: `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`.
 
 The default model is `gemini-2.0-flash` (or whatever is set via the `GEMINI_MODEL` environment variable). If a previously selected model becomes unavailable, the bot will reply with a friendly error suggesting you run `/model` again.
+
+## Vision (photo analysis)
+
+Send a photo to the bot and it will analyze it using Gemini's multimodal capabilities. Add a caption to use as the prompt (e.g. "What's in this image?" or "Translate the text in this photo"). If no caption is provided, the bot defaults to "Describe this image".
+
+The bot remembers image context — you can send a photo, then ask follow-up questions about it in plain text.
+
+## Long message handling
+
+Gemini can produce responses that exceed Telegram's 4096-character message limit. The bot automatically splits long replies into multiple messages, preferring to break at:
+
+1. Code block boundaries — keeps code blocks intact
+2. Paragraph breaks
+3. Line breaks
+4. Spaces — avoids splitting mid-word
 
 ## Using with forum topics (group channels)
 
